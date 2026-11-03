@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f7f7f4">
   <title>숫자 합계</title>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
   <style>
     :root { color-scheme: light; --ink:#20211f; --muted:#73756f; --line:#e7e8e2; --accent:#d94336; --paper:#fff; }
     * { box-sizing:border-box }
@@ -147,9 +147,18 @@
     }
 
     async function getDigitModel() {
-      if (!window.tf) throw new Error('숫자 인식 모델을 불러오지 못했습니다. 인터넷 연결을 확인해주세요.');
+      if (!window.ort) throw new Error('숫자 인식 엔진을 불러오지 못했습니다. 인터넷 연결을 확인해주세요.');
       if (!modelPromise) {
-        modelPromise = tf.loadLayersModel('https://raw.githubusercontent.com/google/tfjs-mnist-workshop/master/model/model.json');
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+        modelPromise = (async () => {
+          const response = await fetch('./mnist-8.onnx.base64.txt');
+          if (!response.ok) throw new Error('손글씨 숫자 모델을 내려받지 못했습니다. 페이지를 새로고침해주세요.');
+          const encoded = (await response.text()).trim();
+          const binary = atob(encoded);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          return ort.InferenceSession.create(bytes, { executionProviders: ['wasm'] });
+        })();
       }
       return modelPromise;
     }
@@ -264,12 +273,11 @@
         for (const cell of cells) {
           const vector = makeMnistVector(gray, width, height, cell);
           if (!vector) continue;
-          const input = tf.tensor2d(vector, [1, 784]);
-          const output = model.predict(input);
-          const probabilities = await output.data();
-          input.dispose(); output.dispose();
+          const input = new ort.Tensor('float32', vector, [1, 1, 28, 28]);
+          const outputs = await model.run({ [model.inputNames[0]]: input });
+          const scores = outputs[model.outputNames[0]].data;
           let digit = 0;
-          for (let i = 1; i < probabilities.length; i++) if (probabilities[i] > probabilities[digit]) digit = i;
+          for (let i = 1; i < scores.length; i++) if (scores[i] > scores[digit]) digit = i;
           found.push(digit);
         }
         if (!found.length) {
