@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f7f7f4">
   <title>숫자 합계</title>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js"></script>
   <style>
     :root { color-scheme: light; --ink:#20211f; --muted:#73756f; --line:#e7e8e2; --accent:#d94336; --paper:#fff; }
     * { box-sizing:border-box }
@@ -66,7 +66,7 @@
 
     <details>
       <summary>잘 인식되게 쓰는 방법</summary>
-      <p>밝은 곳에서 종이를 평평하게 두고, 숫자가 화면 가운데 세로 가이드 안에 들어오도록 맞춰주세요. 숫자끼리는 약간 띄워 쓰면 좋습니다. 인식이 틀리면 종이 위치를 바꿔 다시 읽어보세요.</p>
+      <p>밝은 곳에서 종이를 평평하게 두고, 숫자가 화면 가운데 세로 가이드 안에 들어오도록 맞춰주세요. 이 버전은 가로선으로 나뉜 표에서 칸마다 숫자 하나가 적힌 형태를 읽습니다.</p>
       <p>이 페이지는 HTTPS 주소에서 열어야 아이폰 Safari가 카메라를 허용합니다. HTML 파일을 메시지나 파일 앱에서 직접 열면 카메라가 작동하지 않을 수 있습니다.</p>
     </details>
   </main>
@@ -83,7 +83,7 @@
     const totalEl = document.querySelector('#total');
     const numbersEl = document.querySelector('#numbers');
     let stream = null;
-    let workerPromise = null;
+    let modelPromise = null;
 
     function status(message, error = false) {
       statusEl.textContent = message;
@@ -146,44 +146,136 @@
       return preview;
     }
 
-    async function getWorker() {
-      if (!window.Tesseract) throw new Error('OCR 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인해주세요.');
-      if (!workerPromise) {
-        workerPromise = Tesseract.createWorker('eng').then(async worker => {
-          await worker.setParameters({
-            tessedit_char_whitelist: '0123456789,',
-            tessedit_pageseg_mode: '6',
-            user_defined_dpi: '300'
-          });
-          return worker;
-        });
+    async function getDigitModel() {
+      if (!window.tf) throw new Error('숫자 인식 모델을 불러오지 못했습니다. 인터넷 연결을 확인해주세요.');
+      if (!modelPromise) {
+        modelPromise = tf.loadLayersModel('https://raw.githubusercontent.com/google/tfjs-mnist-workshop/master/model/model.json');
       }
-      return workerPromise;
+      return modelPromise;
+    }
+
+    function grayscale(canvas) {
+      const { width, height } = canvas;
+      const data = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, width, height).data;
+      const gray = new Uint8Array(width * height);
+      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        gray[p] = Math.round(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+      }
+      return { gray, width, height };
+    }
+
+    function findDigitCells(gray, width, height) {
+      const lineRows = [];
+      for (let y = 0; y < height; y++) {
+        let dark = 0;
+        for (let x = 0; x < width; x++) if (gray[y * width + x] < 165) dark++;
+        lineRows.push(dark / width > 0.38);
+      }
+      const lines = [];
+      for (let y = 0; y < height;) {
+        if (!lineRows[y]) { y++; continue; }
+        const start = y;
+        while (y < height && lineRows[y]) y++;
+        const thickness = y - start;
+        if (thickness <= Math.max(12, height * 0.025)) lines.push(Math.round((start + y - 1) / 2));
+      }
+      const boundaries = [0, ...lines.filter(y => y > height * 0.025 && y < height * 0.975), height];
+      const cells = [];
+      for (let i = 0; i < boundaries.length - 1; i++) {
+        const top = boundaries[i], bottom = boundaries[i + 1];
+        if (bottom - top > height * 0.045) cells.push({ top, bottom });
+      }
+      return cells;
+    }
+
+    function makeMnistVector(gray, width, height, cell) {
+      const left = Math.round(width * 0.16);
+      const right = Math.round(width * 0.84);
+      const cellHeight = cell.bottom - cell.top;
+      const padY = Math.max(3, Math.round(cellHeight * 0.12));
+      const top = Math.min(cell.bottom - 1, cell.top + padY);
+      const bottom = Math.max(top + 1, cell.bottom - padY);
+      const histogram = new Uint32Array(256);
+      let count = 0;
+      for (let y = top; y < bottom; y++) for (let x = left; x < right; x++) {
+        histogram[gray[y * width + x]]++; count++;
+      }
+      let sum = 0;
+      for (let i = 0; i < 256; i++) sum += i * histogram[i];
+      let sumB = 0, weightB = 0, best = -1, threshold = 150;
+      for (let i = 0; i < 256; i++) {
+        weightB += histogram[i];
+        if (!weightB) continue;
+        const weightF = count - weightB;
+        if (!weightF) break;
+        sumB += i * histogram[i];
+        const between = weightB * weightF * Math.pow(sumB / weightB - (sum - sumB) / weightF, 2);
+        if (between > best) { best = between; threshold = i; }
+      }
+      threshold = Math.max(70, Math.min(205, threshold));
+      let minX = right, maxX = left, minY = bottom, maxY = top, foregroundCount = 0;
+      for (let y = top; y < bottom; y++) for (let x = left; x < right; x++) {
+        if (gray[y * width + x] < threshold) {
+          foregroundCount++;
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+      }
+      if (maxX < minX || maxY < minY || foregroundCount / count < 0.003) return null;
+      const digitWidth = maxX - minX + 1, digitHeight = maxY - minY + 1;
+      const side = Math.max(digitWidth, digitHeight);
+      const scale = 20 / side;
+      const drawWidth = Math.max(1, Math.round(digitWidth * scale));
+      const drawHeight = Math.max(1, Math.round(digitHeight * scale));
+      const digitCanvas = document.createElement('canvas');
+      digitCanvas.width = digitCanvas.height = 28;
+      const ctx = digitCanvas.getContext('2d', { willReadFrequently: true });
+      ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 28, 28);
+      const mask = document.createElement('canvas');
+      mask.width = digitWidth; mask.height = digitHeight;
+      const maskCtx = mask.getContext('2d');
+      const pixels = maskCtx.createImageData(digitWidth, digitHeight);
+      for (let y = 0; y < digitHeight; y++) for (let x = 0; x < digitWidth; x++) {
+        const ink = gray[(minY + y) * width + minX + x] < threshold;
+        const i = (y * digitWidth + x) * 4;
+        pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = ink ? 255 : 0;
+        pixels.data[i + 3] = 255;
+      }
+      maskCtx.putImageData(pixels, 0, 0);
+      ctx.drawImage(mask, 0, 0, digitWidth, digitHeight,
+        Math.round((28 - drawWidth) / 2), Math.round((28 - drawHeight) / 2), drawWidth, drawHeight);
+      const normalized = ctx.getImageData(0, 0, 28, 28).data;
+      const vector = new Float32Array(784);
+      for (let i = 0; i < 784; i++) vector[i] = normalized[i * 4] / 255;
+      return vector;
     }
 
     async function scan() {
       if (!video.videoWidth) return;
       scanButton.disabled = true;
-      status('가이드 안의 숫자를 읽고 있습니다. 처음에는 조금 걸릴 수 있어요.');
+      status('칸마다 숫자를 분류하고 있습니다. 처음에는 모델을 불러오느라 조금 걸릴 수 있어요.');
       try {
         const image = captureGuideImage();
-        const worker = await getWorker();
-        const parseNumbers = text => [...text.matchAll(/\d[\d,]*/g)]
-          .map(match => match[0].replace(/,/g, ''))
-          .filter(value => value.length > 0 && Number.isSafeInteger(Number(value)))
-          .map(Number);
-        await worker.setParameters({ tessedit_pageseg_mode: '6' });
-        let result = await worker.recognize(image);
-        let found = parseNumbers(result.data.text);
-        if (!found.length) {
-          await worker.setParameters({ tessedit_pageseg_mode: '11' });
-          result = await worker.recognize(image);
-          found = parseNumbers(result.data.text);
+        const { gray, width, height } = grayscale(image);
+        const cells = findDigitCells(gray, width, height);
+        if (cells.length < 2) throw new Error('숫자 칸의 가로선을 찾지 못했습니다. 칸이 화면 가이드에 들어오도록 맞춰주세요.');
+        const model = await getDigitModel();
+        const found = [];
+        for (const cell of cells) {
+          const vector = makeMnistVector(gray, width, height, cell);
+          if (!vector) continue;
+          const input = tf.tensor2d(vector, [1, 784]);
+          const output = model.predict(input);
+          const probabilities = await output.data();
+          input.dispose(); output.dispose();
+          let digit = 0;
+          for (let i = 1; i < probabilities.length; i++) if (probabilities[i] > probabilities[digit]) digit = i;
+          found.push(digit);
         }
         if (!found.length) {
           totalEl.textContent = '—';
-          numbersEl.textContent = '숫자를 찾지 못했습니다. 아래 미리보기에서 숫자가 가이드 안에 온전히 보이는지 확인해주세요.';
-          status('숫자가 가이드 안에 들어오도록 위치를 맞추고 초점을 맞춰주세요.');
+          numbersEl.textContent = '숫자 칸에서 글씨를 찾지 못했습니다. 아래 미리보기에서 칸과 숫자가 온전히 보이는지 확인해주세요.';
+          status('숫자가 각 칸의 가운데에 보이도록 위치를 맞춰주세요.');
         } else {
           const sum = found.reduce((a, b) => a + b, 0);
           totalEl.textContent = sum.toLocaleString('ko-KR');
