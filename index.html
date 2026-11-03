@@ -61,6 +61,7 @@
       <div class="total" id="total">—</div>
       <div class="numbers" id="numbers">읽은 숫자가 여기에 표시됩니다.</div>
       <canvas class="preview" id="preview"></canvas>
+      <div class="hint" id="previewNote" hidden>위 미리보기는 컬러 원본입니다. 숫자 인식은 빨간 글씨를 부드럽게 강조한 이미지로 처리합니다.</div>
     </section>
 
     <details>
@@ -78,6 +79,7 @@
     const scanButton = document.querySelector('#scanButton');
     const statusEl = document.querySelector('#status');
     const preview = document.querySelector('#preview');
+    const previewNote = document.querySelector('#previewNote');
     const totalEl = document.querySelector('#total');
     const numbersEl = document.querySelector('#numbers');
     let stream = null;
@@ -138,17 +140,25 @@
       preview.height = height;
       const ctx = preview.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, width, height);
-      const image = ctx.getImageData(0, 0, width, height);
-      const px = image.data;
-      for (let i = 0; i < px.length; i += 4) {
-        const r = px[i], g = px[i + 1], b = px[i + 2];
-        const isRed = r > 75 && r > g * 1.28 && r > b * 1.2 && (r - Math.max(g, b)) > 32;
-        const ink = isRed ? Math.max(0, Math.min(255, (g + b) * 0.62)) : 255;
+      const sourcePixels = ctx.getImageData(0, 0, width, height).data;
+      const ocrCanvas = document.createElement('canvas');
+      ocrCanvas.width = width;
+      ocrCanvas.height = height;
+      const ocrCtx = ocrCanvas.getContext('2d', { willReadFrequently: true });
+      const ocrImage = ocrCtx.createImageData(width, height);
+      const px = ocrImage.data;
+      for (let i = 0; i < sourcePixels.length; i += 4) {
+        const r = sourcePixels[i], g = sourcePixels[i + 1], b = sourcePixels[i + 2];
+        const redDifference = r - Math.max(g, b);
+        const isRed = r > 65 && redDifference > 14 && r > g * 1.05 && r > b * 1.05;
+        const ink = isRed ? Math.max(0, 255 - (redDifference - 10) * 4.2) : 255;
         px[i] = px[i + 1] = px[i + 2] = ink;
+        px[i + 3] = 255;
       }
-      ctx.putImageData(image, 0, 0);
+      ocrCtx.putImageData(ocrImage, 0, 0);
       preview.style.display = 'block';
-      return preview;
+      previewNote.hidden = false;
+      return ocrCanvas;
     }
 
     async function getWorker() {
