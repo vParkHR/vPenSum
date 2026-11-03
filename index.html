@@ -152,7 +152,8 @@
         workerPromise = Tesseract.createWorker('eng').then(async worker => {
           await worker.setParameters({
             tessedit_char_whitelist: '0123456789,',
-            tessedit_pageseg_mode: '11'
+            tessedit_pageseg_mode: '6',
+            user_defined_dpi: '300'
           });
           return worker;
         });
@@ -167,15 +168,22 @@
       try {
         const image = captureGuideImage();
         const worker = await getWorker();
-        const result = await worker.recognize(image);
-        const found = [...result.data.text.matchAll(/\d[\d,]*/g)]
+        const parseNumbers = text => [...text.matchAll(/\d[\d,]*/g)]
           .map(match => match[0].replace(/,/g, ''))
           .filter(value => value.length > 0 && Number.isSafeInteger(Number(value)))
           .map(Number);
+        await worker.setParameters({ tessedit_pageseg_mode: '6' });
+        let result = await worker.recognize(image);
+        let found = parseNumbers(result.data.text);
+        if (!found.length) {
+          await worker.setParameters({ tessedit_pageseg_mode: '11' });
+          result = await worker.recognize(image);
+          found = parseNumbers(result.data.text);
+        }
         if (!found.length) {
           totalEl.textContent = '—';
-          numbersEl.textContent = '숫자를 찾지 못했습니다. 더 밝은 곳에서 가까이 비춰보세요.';
-          status('인식된 숫자가 없습니다. 위치와 초점을 조정한 뒤 다시 읽어주세요.');
+          numbersEl.textContent = '숫자를 찾지 못했습니다. 아래 미리보기에서 숫자가 가이드 안에 온전히 보이는지 확인해주세요.';
+          status('숫자가 가이드 안에 들어오도록 위치를 맞추고 초점을 맞춰주세요.');
         } else {
           const sum = found.reduce((a, b) => a + b, 0);
           totalEl.textContent = sum.toLocaleString('ko-KR');
