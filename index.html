@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f7f4">
+  <title>빨간 숫자 합계</title>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <style>
+    :root { color-scheme: light; --ink:#20211f; --muted:#73756f; --line:#e7e8e2; --accent:#d94336; --paper:#fff; }
+    * { box-sizing:border-box }
+    body { margin:0; background:#f7f7f4; color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(100%,560px); min-height:100dvh; margin:auto; padding:calc(22px + env(safe-area-inset-top)) 18px calc(26px + env(safe-area-inset-bottom)); display:flex; flex-direction:column; gap:18px; }
+    header { padding:4px 2px 0 }
+    h1 { font-size:27px; line-height:1.2; margin:0 0 8px; letter-spacing:-.7px }
+    header p,.hint { color:var(--muted); font-size:14px; line-height:1.55; margin:0 }
+    .camera { background:#171816; position:relative; width:100%; aspect-ratio:4/3; border-radius:20px; overflow:hidden; display:grid; place-items:center; }
+    video { width:100%; height:100%; object-fit:cover; }
+    .empty { position:absolute; inset:0; color:#eee; display:grid; place-content:center; text-align:center; gap:9px; padding:20px; font-size:14px; line-height:1.5; }
+    .empty b { font-size:36px; font-weight:500 }
+    .scan-frame { position:absolute; inset:12%; border:1px solid rgba(255,255,255,.75); border-radius:14px; box-shadow:0 0 0 999px rgba(0,0,0,.12); pointer-events:none; }
+    .panel { background:var(--paper); border:1px solid var(--line); border-radius:18px; padding:17px; }
+    .row { display:flex; align-items:center; justify-content:space-between; gap:12px }
+    .label { font-size:13px; color:var(--muted) }
+    .total { font-size:40px; font-weight:700; letter-spacing:-1.5px; line-height:1.15; margin-top:3px; font-variant-numeric:tabular-nums; }
+    .numbers { margin-top:14px; padding-top:12px; border-top:1px solid var(--line); color:#555750; font-size:14px; min-height:22px; overflow-wrap:anywhere }
+    .buttons { display:grid; grid-template-columns:1fr 1fr; gap:10px }
+    button { border:0; border-radius:14px; padding:15px 12px; font:600 15px inherit; font-size:15px; cursor:pointer; min-height:52px; }
+    button:disabled { opacity:.48; cursor:default }
+    .primary { background:var(--accent); color:white }
+    .secondary { background:white; border:1px solid var(--line); color:var(--ink) }
+    .status { min-height:20px; text-align:center; color:var(--muted); font-size:13px; line-height:1.45 }
+    .status.error { color:#b32d24 }
+    details { color:var(--muted); font-size:13px; line-height:1.6; }
+    summary { color:#555750; cursor:pointer; }
+    .preview { display:none; width:100%; max-height:180px; object-fit:contain; background:#eee; border-radius:12px; margin-top:12px; }
+    @media (min-height:800px) { main { justify-content:center } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>빨간 숫자 합계</h1>
+      <p>카메라에 빨간색으로 쓴 숫자를 비추고 읽기를 누르세요.</p>
+    </header>
+
+    <section class="camera" aria-label="카메라 미리보기">
+      <video id="video" autoplay muted playsinline></video>
+      <div class="empty" id="empty"><b>◎</b><span>카메라를 켜면 여기에 영상이 표시됩니다</span></div>
+      <div class="scan-frame" id="frame" hidden></div>
+    </section>
+
+    <div class="buttons">
+      <button class="secondary" id="cameraButton">카메라 켜기</button>
+      <button class="primary" id="scanButton" disabled>빨간 숫자 읽기</button>
+    </div>
+    <div class="status" id="status" role="status" aria-live="polite">숫자가 화면 안에 크게 보이도록 맞춰주세요.</div>
+
+    <section class="panel" aria-live="polite">
+      <div class="label">인식한 숫자의 합계</div>
+      <div class="total" id="total">—</div>
+      <div class="numbers" id="numbers">읽은 숫자가 여기에 표시됩니다.</div>
+      <canvas class="preview" id="preview"></canvas>
+    </section>
+
+    <details>
+      <summary>잘 인식되게 쓰는 방법</summary>
+      <p>밝은 곳에서 종이를 평평하게 두고, 빨간 숫자가 화면에 크게 나오도록 맞춰주세요. 숫자끼리는 약간 띄워 쓰면 좋습니다. 인식이 틀리면 종이 위치를 바꿔 다시 읽어보세요.</p>
+      <p>이 페이지는 HTTPS 주소에서 열어야 아이폰 Safari가 카메라를 허용합니다. HTML 파일을 메시지나 파일 앱에서 직접 열면 카메라가 작동하지 않을 수 있습니다.</p>
+    </details>
+  </main>
+
+  <script>
+    const video = document.querySelector('#video');
+    const empty = document.querySelector('#empty');
+    const frame = document.querySelector('#frame');
+    const cameraButton = document.querySelector('#cameraButton');
+    const scanButton = document.querySelector('#scanButton');
+    const statusEl = document.querySelector('#status');
+    const preview = document.querySelector('#preview');
+    const totalEl = document.querySelector('#total');
+    const numbersEl = document.querySelector('#numbers');
+    let stream = null;
+    let workerPromise = null;
+
+    function status(message, error = false) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle('error', error);
+    }
+
+    async function startCamera() {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error('카메라를 사용할 수 없는 주소입니다. HTTPS 웹 주소로 열어주세요.');
+        }
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+        });
+        video.srcObject = stream;
+        await video.play();
+        empty.hidden = true;
+        frame.hidden = false;
+        scanButton.disabled = false;
+        cameraButton.textContent = '카메라 끄기';
+        status('숫자가 화면 안에 크게 보이도록 맞춰주세요.');
+      } catch (e) {
+        status(e.message || '카메라를 켜지 못했습니다. Safari 설정에서 카메라 권한을 확인해주세요.', true);
+      }
+    }
+
+    function stopCamera() {
+      stream?.getTracks().forEach(track => track.stop());
+      stream = null;
+      video.srcObject = null;
+      empty.hidden = false;
+      frame.hidden = true;
+      scanButton.disabled = true;
+      cameraButton.textContent = '카메라 켜기';
+      status('카메라가 꺼졌습니다.');
+    }
+
+    function makeRedOnlyImage() {
+      const maxWidth = 1500;
+      const scale = Math.min(2, maxWidth / video.videoWidth);
+      const width = Math.max(1, Math.round(video.videoWidth * scale));
+      const height = Math.max(1, Math.round(video.videoHeight * scale));
+      preview.width = width;
+      preview.height = height;
+      const ctx = preview.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(video, 0, 0, width, height);
+      const image = ctx.getImageData(0, 0, width, height);
+      const px = image.data;
+      for (let i = 0; i < px.length; i += 4) {
+        const r = px[i], g = px[i + 1], b = px[i + 2];
+        const isRed = r > 75 && r > g * 1.28 && r > b * 1.2 && (r - Math.max(g, b)) > 32;
+        const ink = isRed ? Math.max(0, Math.min(255, (g + b) * 0.62)) : 255;
+        px[i] = px[i + 1] = px[i + 2] = ink;
+      }
+      ctx.putImageData(image, 0, 0);
+      preview.style.display = 'block';
+      return preview;
+    }
+
+    async function getWorker() {
+      if (!window.Tesseract) throw new Error('OCR 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인해주세요.');
+      if (!workerPromise) {
+        workerPromise = Tesseract.createWorker('eng').then(async worker => {
+          await worker.setParameters({
+            tessedit_char_whitelist: '0123456789,',
+            tessedit_pageseg_mode: '11'
+          });
+          return worker;
+        });
+      }
+      return workerPromise;
+    }
+
+    async function scan() {
+      if (!video.videoWidth) return;
+      scanButton.disabled = true;
+      status('빨간색을 골라 숫자를 읽고 있습니다. 처음에는 조금 걸릴 수 있어요.');
+      try {
+        const image = makeRedOnlyImage();
+        const worker = await getWorker();
+        const result = await worker.recognize(image);
+        const found = [...result.data.text.matchAll(/\d[\d,]*/g)]
+          .map(match => match[0].replace(/,/g, ''))
+          .filter(value => value.length > 0 && Number.isSafeInteger(Number(value)))
+          .map(Number);
+        if (!found.length) {
+          totalEl.textContent = '—';
+          numbersEl.textContent = '숫자를 찾지 못했습니다. 더 밝은 곳에서 가까이 비춰보세요.';
+          status('인식된 숫자가 없습니다. 위치와 초점을 조정한 뒤 다시 읽어주세요.');
+        } else {
+          const sum = found.reduce((a, b) => a + b, 0);
+          totalEl.textContent = sum.toLocaleString('ko-KR');
+          numbersEl.textContent = `읽은 숫자: ${found.map(n => n.toLocaleString('ko-KR')).join(' + ')}`;
+          status('완료했습니다. 인식한 숫자를 확인해주세요.');
+        }
+      } catch (e) {
+        status(e.message || '숫자를 읽지 못했습니다. 다시 시도해주세요.', true);
+      } finally {
+        scanButton.disabled = !stream;
+      }
+    }
+
+    cameraButton.addEventListener('click', () => stream ? stopCamera() : startCamera());
+    scanButton.addEventListener('click', scan);
+    window.addEventListener('pagehide', () => stream?.getTracks().forEach(track => track.stop()));
+  </script>
+</body>
+</html>
+
